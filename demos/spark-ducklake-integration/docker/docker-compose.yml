@@ -1,0 +1,104 @@
+version: "3.9"
+
+services:
+  # PostgresSQL
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    environment:
+      POSTGRES_USER: odc
+      POSTGRES_PASSWORD: odc
+      POSTGRES_DB: odc_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    networks:
+      - backend
+
+  # MinIO
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    container_name: minio
+    environment:
+      MINIO_ROOT_USER: odc
+      MINIO_ROOT_PASSWORD: odc123456789
+    command: server /data --console-address ":9001"
+    ports:
+      - "9000:9000"
+      - "9001:9001" # MinIO console
+    volumes:
+      - minio_data:/data
+    networks:
+      - backend
+  minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    volumes:
+      - ../data:/upload
+    depends_on:
+      - minio
+    entrypoint: >
+      sh -c "
+      echo 'Waiting for MinIO to be ready...';
+      until mc alias set local http://minio:9000 odc odc123456789 >/dev/null 2>&1; do
+        sleep 2;
+      done;
+      echo 'Connected to MinIO, creating bucket...';
+      mc mb --ignore-existing local/odc-bucket;
+      echo 'Bucket odc-bucket created.';
+      echo 'Uploading parquet file...';
+      mc cp /upload/yellow_tripdata_2025-09.parquet local/odc-bucket/;
+      echo 'Upload completed.';
+      "
+    networks:
+      - backend
+    restart: "no"
+
+  # Spark Master
+  spark-master:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: spark-master
+    environment:
+      - SPARK_MODE=master
+      - SPARK_RPC_AUTHENTICATION_ENABLED=no
+      - SPARK_RPC_ENCRYPTION_ENABLED=no
+      - SPARK_LOCAL_STORAGE_ENCRYPTION_ENABLED=no
+      - SPARK_SSL_ENABLED=no
+    ports:
+      - "7077:7077" # Spark Master Port
+      - "8080:8080" # Spark Master Web UI
+    volumes:
+      - ../src:/opt/app/src # Mount scripts
+    depends_on:
+      - postgres
+      - minio
+    networks:
+      - backend
+  # Spark Worker
+  spark-worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    container_name: spark-worker
+    environment:
+      - SPARK_MODE=worker
+      - SPARK_MASTER_URL=spark://spark-master:7077
+      - SPARK_WORKER_MEMORY=1G
+    depends_on:
+      - spark-master
+    ports:
+      - "8081:8081" # Spark Worker Web UI
+    volumes:
+      - ../src:/opt/app/src # Mount scripts
+    networks:
+      - backend
+
+volumes:
+  minio_data:
+  pg_data:
+
+networks:
+  backend:
+    driver: bridge
